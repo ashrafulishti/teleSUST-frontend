@@ -1,0 +1,74 @@
+/**
+ * src/services/groupsService.js
+ *
+ * API wrappers for /groups and /groups/{group_id}/channels endpoints.
+ * Response shapes sourced directly from schemas/group.py + schemas/channel.py.
+ */
+
+import api from './api'
+
+// ---------------------------------------------------------------------------
+// Groups
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /groups
+ * Backend returns GroupListResponse: { groups: GroupResponse[], total: number }
+ */
+export async function getGroups() {
+  const response = await api.get('/groups')
+  return response.data.groups ?? []
+}
+
+/**
+ * POST /groups
+ * Body: GroupCreateRequest { name, description?, join_password, is_read_only? }
+ * Returns: GroupResponse
+ */
+export async function createGroup({ name, description, join_password, is_read_only = false }) {
+  const response = await api.post('/groups', {
+    name,
+    description:   description || undefined,  // omit empty string — field is Optional
+    join_password,
+    is_read_only,
+  })
+  return response.data
+}
+
+/**
+ * POST /groups/{group_id}/join
+ * Body: GroupJoinRequest { join_password }
+ * Returns: GroupJoinResponse { message, group }
+ */
+export async function joinGroup(groupId, joinPassword) {
+  const response = await api.post(`/groups/${groupId}/join`, {
+    join_password: joinPassword,
+  })
+  return response.data
+}
+
+// ---------------------------------------------------------------------------
+// Channels (nested under a group)
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /groups/{group_id}/channels
+ * Backend returns ChannelListResponse: { channels: ChannelResponse[], total: number }
+ */
+export async function getChannels(groupId) {
+  const response = await api.get(`/groups/${groupId}/channels`)
+  return response.data.channels ?? []
+}
+
+/**
+ * POST /groups/{group_id}/channels
+ * Body: ChannelCreateRequest { name, topic? }
+ * Returns: ChannelResponse
+ */
+export async function createChannel(groupId, { name, topic }) {
+  const response = await api.post(`/groups/${groupId}/channels`, {
+    name,
+    topic: topic || undefined,
+  })
+  return response.data
+}
