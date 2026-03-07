@@ -4,19 +4,20 @@
  * Three-column layout:
  *
  *  ┌──────────────┬─────────────────┬──────────────────────────────┐
- *  │  Groups      │  Channels       │  Main panel                  │
- *  │  sidebar     │  (loads when    │  (placeholder for messages)  │
- *  │              │   group clicked)│                              │
+ *  │  Groups      │  Channels       │  ChatPanel (real-time msgs)  │
+ *  │  sidebar     │  (loads when    │  (mounts when channel        │
+ *  │              │   group clicked)│   selected)                  │
  *  └──────────────┴─────────────────┴──────────────────────────────┘
  *
- * State:
- *   groups         — from GET /groups
- *   selectedGroup  — GroupResponse object, set on group click
- *   channels       — from GET /groups/{id}/channels, reloads per group
- *   selectedChannel— ChannelResponse object, set on channel click
+ * Changes from placeholder version
+ * ---------------------------------
+ * • Column 3 now renders <ChatPanel> instead of the "Messages coming next" stub
+ * • token and currentUser are passed down from AuthContext
+ * • Key={selectedChannel.id} on ChatPanel guarantees a fresh WS connection
+ *   whenever the user switches channels
  */
 
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '../context/AuthContext'
 import {
@@ -26,6 +27,7 @@ import {
   getChannels,
   createChannel,
 } from '../services/groupsService'
+import ChatPanel from '../components/ChatPanel'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -76,7 +78,7 @@ function ErrorBanner({ message }) {
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function DashboardPage() {
-  const { user, logoutUser } = useAuth()
+  const { user, token, logoutUser } = useAuth()
   const navigate = useNavigate()
 
   // Groups
@@ -123,10 +125,6 @@ export default function DashboardPage() {
     return () => { cancelled = true }
   }, [selectedGroup?.id])
 
-  function handleSelectGroup(group) {
-    setSelectedGroup(group)
-  }
-
   function handleLogout() {
     logoutUser()
     navigate('/login', { replace: true })
@@ -151,13 +149,11 @@ export default function DashboardPage() {
           <div className="flex items-center justify-between px-2 mb-1">
             <span className="text-[10px] font-semibold uppercase tracking-widest text-gray-600">Groups</span>
             <div className="flex gap-1">
-              {/* Join */}
               <button
                 onClick={() => setModal('joinGroup')}
                 title="Join a group"
                 className="w-5 h-5 flex items-center justify-center rounded text-gray-600 hover:text-gray-300 hover:bg-white/10 transition-colors text-sm"
               >⤵</button>
-              {/* Create */}
               <button
                 onClick={() => setModal('createGroup')}
                 title="Create a group"
@@ -184,7 +180,7 @@ export default function DashboardPage() {
                 return (
                   <li key={group.id}>
                     <button
-                      onClick={() => handleSelectGroup(group)}
+                      onClick={() => setSelectedGroup(group)}
                       className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-left transition-all group
                         ${isActive ? 'bg-indigo-500/20 text-white' : 'text-gray-400 hover:bg-white/[0.05] hover:text-gray-200'}`}
                     >
@@ -219,7 +215,7 @@ export default function DashboardPage() {
       </aside>
 
       {/* ══════════════════════════════════════════════
-          COLUMN 2 — Channels sidebar (only when group selected)
+          COLUMN 2 — Channels sidebar
       ══════════════════════════════════════════════ */}
       {selectedGroup && (
         <aside className="flex flex-col w-[200px] shrink-0 bg-[#13131e] border-r border-white/[0.06]">
@@ -268,7 +264,6 @@ export default function DashboardPage() {
                         className={`w-full flex items-center gap-1.5 px-2 py-1.5 rounded-md text-left transition-all
                           ${isActive ? 'bg-indigo-500/20 text-white' : 'text-gray-500 hover:bg-white/[0.05] hover:text-gray-300'}`}
                       >
-                        {/* # prefix like Slack/Discord */}
                         <span className={`text-sm font-light shrink-0 ${isActive ? 'text-indigo-400' : 'text-gray-600'}`}>#</span>
                         <div className="flex-1 min-w-0">
                           <p className="text-xs font-medium truncate">{channel.name}</p>
@@ -287,34 +282,18 @@ export default function DashboardPage() {
       )}
 
       {/* ══════════════════════════════════════════════
-          COLUMN 3 — Main panel
+          COLUMN 3 — Chat panel / empty states
       ══════════════════════════════════════════════ */}
       <main className="flex-1 flex flex-col overflow-hidden">
         {selectedChannel ? (
-          <>
-            {/* Channel header */}
-            <div className="flex items-center gap-3 px-6 py-[14px] border-b border-white/[0.06] bg-[#13131e] shrink-0">
-              <span className="text-indigo-400 text-lg font-light">#</span>
-              <div>
-                <h1 className="text-white font-semibold text-sm">{selectedChannel.name}</h1>
-                {selectedChannel.topic && (
-                  <p className="text-gray-500 text-xs">{selectedChannel.topic}</p>
-                )}
-              </div>
-              <span className="ml-auto font-mono text-[10px] text-gray-700 bg-white/[0.03] px-2 py-1 rounded border border-white/[0.05]">
-                {selectedChannel.id}
-              </span>
-            </div>
-
-            {/* Messages placeholder — you'll build this next */}
-            <div className="flex-1 flex items-center justify-center">
-              <div className="text-center space-y-2">
-                <div className="text-4xl opacity-20">💬</div>
-                <p className="text-gray-500 text-sm font-medium">Messages coming next</p>
-                <p className="text-gray-700 text-xs font-mono">channel_id: {selectedChannel.id}</p>
-              </div>
-            </div>
-          </>
+          // Key on channel.id: React fully unmounts+remounts ChatPanel
+          // (and its WebSocket) whenever the user switches channels.
+          <ChatPanel
+            key={selectedChannel.id}
+            channel={selectedChannel}
+            token={token}
+            currentUser={user}
+          />
         ) : selectedGroup ? (
           <div className="flex-1 flex items-center justify-center">
             <div className="text-center space-y-2">
@@ -439,13 +418,12 @@ function CreateGroupModal({ onClose, onCreated }) {
 
   return (
     <Modal title="Create a group" onClose={onClose}>
-      {error && <ErrorBanner message={error} />}
+      {error && <div className="mb-3 px-3 py-2 rounded-md bg-red-500/10 border border-red-500/20 text-red-400 text-xs">{error}</div>}
       <form onSubmit={handleSubmit} className="flex flex-col gap-3">
         <ModalInput label="Name" autoFocus required placeholder="e.g. CSE 2021 Batch"
           value={fields.name} onChange={e => set('name', e.target.value)} />
         <ModalInput label="Description" optional placeholder="What's this group for?"
           value={fields.description} onChange={e => set('description', e.target.value)} />
-        {/* join_password is REQUIRED by GroupCreateRequest (min_length=4) */}
         <ModalInput label="Join Password" required type="password" placeholder="Min. 4 characters"
           value={fields.join_password} onChange={e => set('join_password', e.target.value)} />
         <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer select-none">
@@ -463,10 +441,10 @@ function CreateGroupModal({ onClose, onCreated }) {
 // ── Join Group Modal ──────────────────────────────────────────────────────────
 
 function JoinGroupModal({ onClose, onJoined }) {
-  const [groupId, setGroupId]         = useState('')
+  const [groupId, setGroupId]           = useState('')
   const [joinPassword, setJoinPassword] = useState('')
-  const [error, setError]             = useState('')
-  const [busy, setBusy]               = useState(false)
+  const [error, setError]               = useState('')
+  const [busy, setBusy]                 = useState(false)
 
   async function handleSubmit(e) {
     e.preventDefault()
@@ -483,7 +461,7 @@ function JoinGroupModal({ onClose, onJoined }) {
 
   return (
     <Modal title="Join a group" onClose={onClose}>
-      {error && <ErrorBanner message={error} />}
+      {error && <div className="mb-3 px-3 py-2 rounded-md bg-red-500/10 border border-red-500/20 text-red-400 text-xs">{error}</div>}
       <form onSubmit={handleSubmit} className="flex flex-col gap-3">
         <ModalInput label="Group ID" autoFocus required placeholder="Paste the group UUID"
           value={groupId} onChange={e => setGroupId(e.target.value)} />
@@ -520,7 +498,7 @@ function CreateChannelModal({ groupId, onClose, onCreated }) {
 
   return (
     <Modal title="Create a channel" onClose={onClose}>
-      {error && <ErrorBanner message={error} />}
+      {error && <div className="mb-3 px-3 py-2 rounded-md bg-red-500/10 border border-red-500/20 text-red-400 text-xs">{error}</div>}
       <form onSubmit={handleSubmit} className="flex flex-col gap-3">
         <ModalInput label="Name" autoFocus required placeholder="e.g. general"
           value={fields.name} onChange={e => set('name', e.target.value)} />
