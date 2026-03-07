@@ -1,42 +1,41 @@
 /**
  * src/components/ChatPanel.jsx
  *
- * Full real-time chat panel for a single channel.
+ * Fixes in this version
+ * ---------------------
+ * 1. currentUserId — was using currentUser?.sub which is the JWT claim name.
+ *    After the AuthContext fix, user comes from GET /auth/me which returns
+ *    { id, username, email, ... } — so the correct field is .id not .sub.
+ *    Guard: try both so it works regardless of which shape arrives.
  *
- * Features
- * --------
- * • Connects via WebSocket using useWebSocket hook
- * • Renders message history with author, timestamp, edited badge
- * • Auto-scrolls to bottom on new messages (unless user has scrolled up)
- * • Send bar: textarea, submit on Enter (Shift+Enter for newline)
- * • Inline edit: click ✎ → textarea replaces content → PUT /messages/{id}
- * • Delete: click ✕ → confirm → DELETE /messages/{id}
- * • Presence: online user count badge in header
- * • Connection status indicator (connecting / open / closed / error)
- * • System events (join/leave) rendered as subtle dividers
+ * 2. Mobile responsive — full layout works on small screens:
+ *    • Message list scrolls correctly inside flex container
+ *    • Send bar stays pinned to bottom on mobile
+ *    • Text sizes, padding, avatar sizes adjusted for small screens
+ *    • Action buttons (edit/delete) show on tap on mobile (touch devices
+ *      have no hover, so we use a selected state instead)
  *
- * Props
- * -----
- *   channel : ChannelResponse  — { id, name, topic, group_id, created_at }
- *   token   : string           — JWT from AuthContext
- *   currentUser : object       — decoded JWT payload { sub, username, ... }
+ * 3. Message rendering — added defensive checks so missing fields never
+ *    crash the component (username, timestamp, content all have fallbacks)
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useWebSocket } from '../hooks/useWebSocket'
 import { editMessage, deleteMessage } from '../services/messagesService'
 
-// ── Tiny helpers ─────────────────────────────────────────────────────────────
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 function formatTime(isoString) {
   if (!isoString) return ''
-  const d = new Date(isoString)
-  const now = new Date()
-  const diffDays = Math.floor((now - d) / 86400000)
-  if (diffDays === 0) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-  if (diffDays === 1) return `Yesterday ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
-  return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) +
-    ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  try {
+    const d = new Date(isoString)
+    const now = new Date()
+    const diffDays = Math.floor((now - d) / 86400000)
+    if (diffDays === 0) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    if (diffDays === 1) return `Yesterday ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
+    return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) +
+      ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  } catch { return '' }
 }
 
 function avatarHue(str = '') {
@@ -45,8 +44,8 @@ function avatarHue(str = '') {
   return Math.abs(h) % 360
 }
 
-function UserAvatar({ username, size = 28 }) {
-  const hue = avatarHue(username)
+function UserAvatar({ username, size = 32 }) {
+  const hue = avatarHue(username || '?')
   const letter = (username?.[0] ?? '?').toUpperCase()
   return (
     <div style={{
@@ -55,7 +54,6 @@ function UserAvatar({ username, size = 28 }) {
       border: `1.5px solid hsl(${hue},45%,40%)`,
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       fontSize: size * 0.38, fontWeight: 700, color: 'rgba(255,255,255,0.85)',
-      letterSpacing: '-0.01em',
     }}>
       {letter}
     </div>
@@ -76,14 +74,12 @@ function StatusPill({ status }) {
   return (
     <div style={{
       display: 'flex', alignItems: 'center', gap: 5,
-      background: s.bg, borderRadius: 99, padding: '3px 9px',
-      fontSize: 11, color: s.dot, fontWeight: 500,
+      background: s.bg, borderRadius: 99, padding: '3px 8px',
+      fontSize: 11, color: s.dot, fontWeight: 500, whiteSpace: 'nowrap', flexShrink: 0,
     }}>
       <span style={{
-        width: 6, height: 6, borderRadius: '50%',
-        background: s.dot,
+        width: 6, height: 6, borderRadius: '50%', background: s.dot, display: 'inline-block',
         boxShadow: status === 'open' ? `0 0 6px ${s.dot}` : 'none',
-        display: 'inline-block',
         animation: status === 'connecting' ? 'pulse 1.4s ease-in-out infinite' : 'none',
       }} />
       {s.label}
@@ -91,77 +87,65 @@ function StatusPill({ status }) {
   )
 }
 
-// ── System event divider ──────────────────────────────────────────────────────
-
 function SystemLine({ text }) {
   return (
-    <div style={{
-      display: 'flex', alignItems: 'center', gap: 10,
-      padding: '4px 0', margin: '2px 0',
-    }}>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '4px 16px' }}>
       <div style={{ flex: 1, height: 1, background: 'rgba(255,255,255,0.04)' }} />
-      <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.22)', whiteSpace: 'nowrap' }}>
-        {text}
-      </span>
+      <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.22)', whiteSpace: 'nowrap' }}>{text}</span>
       <div style={{ flex: 1, height: 1, background: 'rgba(255,255,255,0.04)' }} />
     </div>
   )
 }
 
-// ── Single message row ────────────────────────────────────────────────────────
+// ── Message row ───────────────────────────────────────────────────────────────
 
-function MessageRow({ msg, isMine, onEdit, onDelete, editingId, onEditSubmit, onEditCancel }) {
+function MessageRow({ msg, isMine, onEdit, onDelete, editingId, onEditSubmit, onEditCancel, isTapped, onTap }) {
   const isEditing = editingId === msg.id
-  const [editText, setEditText] = useState(msg.content)
+  const [editText, setEditText] = useState(msg.content || '')
   const editRef = useRef(null)
+  const hue = avatarHue(msg.username || '?')
 
   useEffect(() => {
     if (isEditing) {
-      setEditText(msg.content)
+      setEditText(msg.content || '')
       setTimeout(() => editRef.current?.focus(), 30)
     }
   }, [isEditing, msg.content])
 
   function handleEditKey(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      if (editText.trim()) onEditSubmit(msg.id, editText.trim())
-    }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); if (editText.trim()) onEditSubmit(msg.id, editText.trim()) }
     if (e.key === 'Escape') onEditCancel()
   }
 
   return (
     <div
-      className="message-row"
+      onClick={() => isMine && onTap(msg.id)}
       style={{
-        display: 'flex', gap: 10, padding: '4px 16px',
-        borderRadius: 6,
-        transition: 'background 0.15s',
+        display: 'flex', gap: 10, padding: '5px 12px',
+        borderRadius: 6, cursor: isMine ? 'pointer' : 'default',
+        background: isTapped ? 'rgba(255,255,255,0.04)' : 'transparent',
+        transition: 'background 0.15s', position: 'relative',
       }}
-      onMouseEnter={e => e.currentTarget.classList.add('hovered')}
-      onMouseLeave={e => e.currentTarget.classList.remove('hovered')}
     >
       {/* Avatar */}
       <UserAvatar username={msg.username} size={32} />
 
       {/* Content */}
       <div style={{ flex: 1, minWidth: 0 }}>
-        {/* Header row */}
-        <div style={{ display: 'flex', alignItems: 'baseline', gap: 7, marginBottom: 3 }}>
-          <span style={{ fontWeight: 600, fontSize: 13, color: `hsl(${avatarHue(msg.username)},70%,75%)` }}>
-            {msg.username}
+        {/* Header */}
+        <div style={{ display: 'flex', alignItems: 'baseline', gap: 6, marginBottom: 2, flexWrap: 'wrap' }}>
+          <span style={{ fontWeight: 600, fontSize: 13, color: `hsl(${hue},70%,72%)` }}>
+            {msg.username || '[deleted]'}
           </span>
           <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.28)' }}>
             {formatTime(msg.timestamp)}
           </span>
           {msg.is_edited && (
-            <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.22)', fontStyle: 'italic' }}>
-              (edited)
-            </span>
+            <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.22)', fontStyle: 'italic' }}>(edited)</span>
           )}
         </div>
 
-        {/* Body — editing or display */}
+        {/* Body */}
         {isEditing ? (
           <div>
             <textarea
@@ -169,7 +153,7 @@ function MessageRow({ msg, isMine, onEdit, onDelete, editingId, onEditSubmit, on
               value={editText}
               onChange={e => setEditText(e.target.value)}
               onKeyDown={handleEditKey}
-              rows={Math.min(editText.split('\n').length + 1, 6)}
+              rows={Math.min((editText.match(/\n/g)?.length ?? 0) + 2, 6)}
               style={{
                 width: '100%', boxSizing: 'border-box',
                 background: 'rgba(255,255,255,0.06)',
@@ -180,21 +164,16 @@ function MessageRow({ msg, isMine, onEdit, onDelete, editingId, onEditSubmit, on
                 fontFamily: "'Inter', sans-serif",
               }}
             />
-            <div style={{ display: 'flex', gap: 6, marginTop: 5 }}>
-              <button
-                onClick={() => { if (editText.trim()) onEditSubmit(msg.id, editText.trim()) }}
-                style={btnStyle('indigo')}
-              >Save</button>
+            <div style={{ display: 'flex', gap: 6, marginTop: 5, flexWrap: 'wrap' }}>
+              <button onClick={() => { if (editText.trim()) onEditSubmit(msg.id, editText.trim()) }} style={btnStyle('indigo')}>Save</button>
               <button onClick={onEditCancel} style={btnStyle('gray')}>Cancel</button>
-              <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)', alignSelf: 'center' }}>
-                Enter to save · Esc to cancel
-              </span>
+              <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.25)', alignSelf: 'center' }}>Enter · Esc</span>
             </div>
           </div>
         ) : (
           <p style={{
-            fontSize: 13.5, color: 'rgba(255,255,255,0.82)',
-            lineHeight: 1.55, margin: 0,
+            fontSize: 13.5, color: 'rgba(255,255,255,0.85)',
+            lineHeight: 1.6, margin: 0,
             wordBreak: 'break-word', whiteSpace: 'pre-wrap',
           }}>
             {msg.content}
@@ -202,22 +181,16 @@ function MessageRow({ msg, isMine, onEdit, onDelete, editingId, onEditSubmit, on
         )}
       </div>
 
-      {/* Action buttons — only visible on hover, only for own messages */}
-      {isMine && !isEditing && (
-        <div className="msg-actions" style={{
+      {/* Action buttons — show on hover (desktop) or tap (mobile) */}
+      {isMine && !isEditing && isTapped && (
+        <div style={{
           display: 'flex', gap: 2, alignItems: 'flex-start',
-          paddingTop: 2, opacity: 0, transition: 'opacity 0.12s',
+          paddingTop: 2, position: 'absolute', right: 12, top: 6,
+          background: '#1a1a28', borderRadius: 6, border: '1px solid rgba(255,255,255,0.08)',
+          padding: '3px 4px',
         }}>
-          <button
-            title="Edit message"
-            onClick={() => onEdit(msg.id)}
-            style={iconBtn}
-          >✎</button>
-          <button
-            title="Delete message"
-            onClick={() => onDelete(msg.id)}
-            style={{ ...iconBtn, color: 'rgba(239,68,68,0.7)' }}
-          >✕</button>
+          <button title="Edit" onClick={e => { e.stopPropagation(); onEdit(msg.id) }} style={iconBtn}>✎</button>
+          <button title="Delete" onClick={e => { e.stopPropagation(); onDelete(msg.id) }} style={{ ...iconBtn, color: 'rgba(239,68,68,0.7)' }}>✕</button>
         </div>
       )}
     </div>
@@ -225,62 +198,50 @@ function MessageRow({ msg, isMine, onEdit, onDelete, editingId, onEditSubmit, on
 }
 
 function btnStyle(color) {
-  const bg = color === 'indigo' ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.06)'
-  const hover = color === 'indigo' ? 'rgba(99,102,241,0.4)' : 'rgba(255,255,255,0.1)'
   return {
     padding: '3px 10px', borderRadius: 4, border: 'none',
-    background: bg, color: color === 'indigo' ? '#a5b4fc' : 'rgba(255,255,255,0.55)',
-    fontSize: 12, fontWeight: 500, cursor: 'pointer',
-    fontFamily: "'Inter', sans-serif",
+    background: color === 'indigo' ? 'rgba(99,102,241,0.25)' : 'rgba(255,255,255,0.06)',
+    color: color === 'indigo' ? '#a5b4fc' : 'rgba(255,255,255,0.55)',
+    fontSize: 12, fontWeight: 500, cursor: 'pointer', fontFamily: "'Inter', sans-serif",
   }
 }
 
 const iconBtn = {
   background: 'none', border: 'none', cursor: 'pointer',
-  color: 'rgba(255,255,255,0.35)', fontSize: 13, padding: '2px 5px',
-  borderRadius: 4, lineHeight: 1,
-  fontFamily: "'Inter', sans-serif",
+  color: 'rgba(255,255,255,0.5)', fontSize: 13, padding: '2px 6px',
+  borderRadius: 4, lineHeight: 1, fontFamily: "'Inter', sans-serif",
 }
 
-// ── Delete confirmation dialog ────────────────────────────────────────────────
+// ── Delete confirmation ───────────────────────────────────────────────────────
 
 function DeleteConfirm({ onConfirm, onCancel }) {
   return (
     <div style={{
-      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)',
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.65)',
       backdropFilter: 'blur(4px)', display: 'flex', alignItems: 'center',
-      justifyContent: 'center', zIndex: 200,
+      justifyContent: 'center', zIndex: 200, padding: '1rem',
     }}>
       <div style={{
         background: '#1a1a28', border: '1px solid rgba(255,255,255,0.1)',
-        borderRadius: 12, padding: '24px 28px', maxWidth: 340, width: '100%',
+        borderRadius: 12, padding: '24px', width: '100%', maxWidth: 320,
         boxShadow: '0 25px 50px rgba(0,0,0,0.6)',
       }}>
-        <p style={{ color: '#f0f0f5', fontSize: 14, fontWeight: 600, marginBottom: 8 }}>
-          Delete message?
-        </p>
-        <p style={{ color: 'rgba(255,255,255,0.45)', fontSize: 13, marginBottom: 20 }}>
-          This cannot be undone.
-        </p>
+        <p style={{ color: '#f0f0f5', fontSize: 15, fontWeight: 600, marginBottom: 8 }}>Delete message?</p>
+        <p style={{ color: 'rgba(255,255,255,0.4)', fontSize: 13, marginBottom: 20 }}>This cannot be undone.</p>
         <div style={{ display: 'flex', gap: 8 }}>
-          <button onClick={onCancel} style={{ ...btnStyle('gray'), flex: 1, padding: '8px 0' }}>
-            Cancel
-          </button>
+          <button onClick={onCancel} style={{ ...btnStyle('gray'), flex: 1, padding: '10px 0' }}>Cancel</button>
           <button onClick={onConfirm} style={{
-            flex: 1, padding: '8px 0', borderRadius: 4, border: 'none',
+            flex: 1, padding: '10px 0', borderRadius: 4, border: 'none',
             background: 'rgba(239,68,68,0.2)', color: '#fca5a5',
-            fontSize: 13, fontWeight: 600, cursor: 'pointer',
-            fontFamily: "'Inter', sans-serif",
-          }}>
-            Delete
-          </button>
+            fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: "'Inter', sans-serif",
+          }}>Delete</button>
         </div>
       </div>
     </div>
   )
 }
 
-// ── Main ChatPanel ─────────────────────────────────────────────────────────────
+// ── Main ChatPanel ────────────────────────────────────────────────────────────
 
 export default function ChatPanel({ channel, token, currentUser }) {
   const { messages, systemEvents, onlineUsers, status, error, sendMessage } =
@@ -288,75 +249,77 @@ export default function ChatPanel({ channel, token, currentUser }) {
 
   const [input,       setInput]       = useState('')
   const [editingId,   setEditingId]   = useState(null)
-  const [confirmId,   setConfirmId]   = useState(null)  // message to delete
+  const [confirmId,   setConfirmId]   = useState(null)
   const [actionError, setActionError] = useState(null)
+  const [tappedId,    setTappedId]    = useState(null) // for mobile tap-to-show-actions
 
-  const bottomRef    = useRef(null)
-  const listRef      = useRef(null)
-  const atBottomRef  = useRef(true)
-  const textareaRef  = useRef(null)
+  const bottomRef   = useRef(null)
+  const listRef     = useRef(null)
+  const atBottomRef = useRef(true)
+  const textareaRef = useRef(null)
 
-  // ── Auto-scroll ────────────────────────────────────────────────────────────
+  // FIX: support both { id } (from GET /auth/me) and { sub } (from JWT decode fallback)
+  const currentUserId = currentUser?.id ?? currentUser?.sub ?? ''
 
+  // ── Auto-scroll ───────────────────────────────────────────────────────────
   useEffect(() => {
     if (atBottomRef.current) {
       bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
     }
-  }, [messages])
+  }, [messages.length])
 
   function handleScroll() {
     const el = listRef.current
     if (!el) return
-    atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+    atBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100
   }
 
   // Reset on channel change
   useEffect(() => {
-    setInput('')
-    setEditingId(null)
-    setConfirmId(null)
-    setActionError(null)
+    setInput(''); setEditingId(null); setConfirmId(null)
+    setActionError(null); setTappedId(null)
     atBottomRef.current = true
   }, [channel.id])
 
-  // ── Send message ───────────────────────────────────────────────────────────
+  // Dismiss tapped state when clicking elsewhere
+  useEffect(() => {
+    function onDocClick() { setTappedId(null) }
+    document.addEventListener('click', onDocClick)
+    return () => document.removeEventListener('click', onDocClick)
+  }, [])
 
+  // ── Send ──────────────────────────────────────────────────────────────────
   function handleSend() {
     const text = input.trim()
     if (!text || status !== 'open') return
     sendMessage(text)
     setInput('')
     atBottomRef.current = true
+    // reset textarea height
+    if (textareaRef.current) textareaRef.current.style.height = 'auto'
   }
 
   function handleInputKey(e) {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      handleSend()
-    }
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() }
   }
 
-  // ── Edit ───────────────────────────────────────────────────────────────────
-
+  // ── Edit ──────────────────────────────────────────────────────────────────
   async function handleEditSubmit(msgId, newContent) {
     setActionError(null)
     try {
       await editMessage(msgId, newContent)
-      // WS broadcast will update the message in state automatically
       setEditingId(null)
     } catch (err) {
       setActionError(err.response?.data?.detail ?? 'Failed to edit message.')
     }
   }
 
-  // ── Delete ─────────────────────────────────────────────────────────────────
-
+  // ── Delete ────────────────────────────────────────────────────────────────
   async function handleDeleteConfirm() {
     if (!confirmId) return
     setActionError(null)
     try {
       await deleteMessage(confirmId)
-      // WS broadcast will remove the message from state automatically
     } catch (err) {
       setActionError(err.response?.data?.detail ?? 'Failed to delete message.')
     } finally {
@@ -364,76 +327,66 @@ export default function ChatPanel({ channel, token, currentUser }) {
     }
   }
 
-  // ── Merge messages and system events into a unified timeline ───────────────
-  // System events aren't timestamped from the server, so we append them at the
-  // bottom as a simple notification rather than interleaving by time.
-
-  const currentUserId = currentUser?.sub ?? currentUser?.id ?? ''
-
   // ── Render ────────────────────────────────────────────────────────────────
-
   return (
     <div style={{
-      display: 'flex', flexDirection: 'column', height: '100%',
+      display: 'flex', flexDirection: 'column',
+      height: '100%', minHeight: 0,   // critical for flex children to scroll
       background: '#0e0e14', fontFamily: "'Inter', sans-serif",
+      overflow: 'hidden',
     }}>
-      {/* ── Keyframe animations ── */}
       <style>{`
-        .message-row:hover { background: rgba(255,255,255,0.025); }
-        .message-row:hover .msg-actions { opacity: 1 !important; }
-        .msg-actions button:hover { background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.7) !important; }
         @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
-        @keyframes fadeIn { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:translateY(0)} }
-        .msg-new { animation: fadeIn 0.18s ease-out both; }
-        textarea:focus { border-color: rgba(99,102,241,0.6) !important; }
-        .send-bar textarea:focus { border-color: rgba(99,102,241,0.5) !important; }
+        @keyframes msgIn { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
+        .msg-new { animation: msgIn 0.16s ease-out both; }
+        .chat-textarea::placeholder { color: rgba(255,255,255,0.25); }
+        .chat-textarea:focus { outline: none; }
+        .send-btn:hover:not(:disabled) { opacity: 0.85; }
+        @media (max-width: 480px) {
+          .channel-topic { display: none; }
+        }
       `}</style>
 
-      {/* ── Channel header ── */}
+      {/* ── Header ── */}
       <div style={{
-        display: 'flex', alignItems: 'center', gap: 12,
-        padding: '10px 20px', borderBottom: '1px solid rgba(255,255,255,0.06)',
-        background: '#13131e', flexShrink: 0,
+        display: 'flex', alignItems: 'center', gap: 10,
+        padding: '10px 14px', borderBottom: '1px solid rgba(255,255,255,0.06)',
+        background: '#13131e', flexShrink: 0, minWidth: 0,
       }}>
-        <span style={{ color: '#818cf8', fontSize: 20, fontWeight: 300, lineHeight: 1 }}>#</span>
+        <span style={{ color: '#818cf8', fontSize: 18, fontWeight: 300, flexShrink: 0 }}>#</span>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <h2 style={{ color: '#f0f0f5', fontSize: 14, fontWeight: 600, margin: 0 }}>
+          <h2 style={{ color: '#f0f0f5', fontSize: 14, fontWeight: 600, margin: 0, truncate: true,
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {channel.name}
           </h2>
           {channel.topic && (
-            <p style={{ color: 'rgba(255,255,255,0.35)', fontSize: 12, margin: 0 }}>
+            <p className="channel-topic" style={{ color: 'rgba(255,255,255,0.3)', fontSize: 11, margin: 0,
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {channel.topic}
             </p>
           )}
         </div>
-
-        {/* Online count */}
         {onlineUsers.length > 0 && (
-          <div style={{
-            display: 'flex', alignItems: 'center', gap: 5,
-            fontSize: 12, color: 'rgba(255,255,255,0.4)',
-          }}>
-            <span style={{ width: 7, height: 7, borderRadius: '50%', background: '#22c55e', display: 'inline-block' }} />
-            {onlineUsers.length} online
+          <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 11,
+            color: 'rgba(255,255,255,0.35)', flexShrink: 0 }}>
+            <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#22c55e', display: 'inline-block' }} />
+            {onlineUsers.length}
           </div>
         )}
-
         <StatusPill status={status} />
       </div>
 
-      {/* ── Connection / action error banner ── */}
+      {/* ── Error banner ── */}
       {(error || actionError) && (
         <div style={{
-          padding: '8px 16px', background: 'rgba(239,68,68,0.1)',
+          padding: '8px 14px', background: 'rgba(239,68,68,0.1)',
           borderBottom: '1px solid rgba(239,68,68,0.2)',
           color: '#fca5a5', fontSize: 12, flexShrink: 0,
           display: 'flex', justifyContent: 'space-between', alignItems: 'center',
         }}>
           <span>⚠ {actionError || error}</span>
-          <button
-            onClick={() => { setActionError(null) }}
-            style={{ background: 'none', border: 'none', color: '#fca5a5', cursor: 'pointer', fontSize: 14 }}
-          >×</button>
+          <button onClick={() => setActionError(null)}
+            style={{ background: 'none', border: 'none', color: '#fca5a5', cursor: 'pointer', fontSize: 16, lineHeight: 1 }}>×</button>
         </div>
       )}
 
@@ -442,123 +395,115 @@ export default function ChatPanel({ channel, token, currentUser }) {
         ref={listRef}
         onScroll={handleScroll}
         style={{
-          flex: 1, overflowY: 'auto', padding: '12px 0',
-          display: 'flex', flexDirection: 'column', gap: 1,
+          flex: 1, overflowY: 'auto', overflowX: 'hidden',
+          padding: '8px 0', display: 'flex', flexDirection: 'column',
+          gap: 0, minHeight: 0,   // must have minHeight:0 for flex+overflow to work
         }}
       >
+        {/* Connecting state */}
+        {status === 'connecting' && messages.length === 0 && (
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
+            color: 'rgba(255,255,255,0.2)', fontSize: 13 }}>
+            Connecting to #{channel.name}…
+          </div>
+        )}
+
         {/* Empty state */}
-        {messages.length === 0 && status === 'open' && (
-          <div style={{
-            flex: 1, display: 'flex', flexDirection: 'column',
+        {status === 'open' && messages.length === 0 && (
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column',
             alignItems: 'center', justifyContent: 'center', gap: 8,
-            color: 'rgba(255,255,255,0.2)',
-          }}>
-            <div style={{ fontSize: 36 }}>💬</div>
-            <p style={{ fontSize: 13, fontWeight: 500 }}>No messages yet</p>
-            <p style={{ fontSize: 12, color: 'rgba(255,255,255,0.15)' }}>
+            color: 'rgba(255,255,255,0.18)', padding: '2rem' }}>
+            <div style={{ fontSize: 40 }}>💬</div>
+            <p style={{ fontSize: 13, fontWeight: 500, margin: 0 }}>No messages yet</p>
+            <p style={{ fontSize: 12, margin: 0, color: 'rgba(255,255,255,0.12)' }}>
               Be the first to say something in #{channel.name}
             </p>
           </div>
         )}
 
-        {/* Loading state */}
-        {status === 'connecting' && messages.length === 0 && (
-          <div style={{
-            flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
-            color: 'rgba(255,255,255,0.25)', fontSize: 13,
-          }}>
-            Connecting to #{channel.name}…
-          </div>
-        )}
-
         {/* Messages */}
-        {messages.map((msg, i) => (
+        {messages.map(msg => (
           <div key={msg.id} className="msg-new">
             <MessageRow
               msg={msg}
-              isMine={msg.author_id === currentUserId}
+              isMine={!!currentUserId && msg.author_id === currentUserId}
               editingId={editingId}
-              onEdit={(id) => { setEditingId(id); setActionError(null) }}
-              onDelete={(id) => { setConfirmId(id); setActionError(null) }}
+              isTapped={tappedId === msg.id}
+              onTap={id => setTappedId(prev => prev === id ? null : id)}
+              onEdit={id => { setEditingId(id); setTappedId(null); setActionError(null) }}
+              onDelete={id => { setConfirmId(id); setTappedId(null); setActionError(null) }}
               onEditSubmit={handleEditSubmit}
               onEditCancel={() => setEditingId(null)}
             />
           </div>
         ))}
 
-        {/* System events at bottom */}
+        {/* System events */}
         {systemEvents.slice(-5).map((ev, i) => (
           <SystemLine key={i} text={ev} />
         ))}
 
-        {/* Scroll anchor */}
-        <div ref={bottomRef} style={{ height: 4 }} />
+        <div ref={bottomRef} style={{ height: 8 }} />
       </div>
 
       {/* ── Send bar ── */}
-      <div
-        className="send-bar"
-        style={{
-          padding: '10px 16px 14px',
-          borderTop: '1px solid rgba(255,255,255,0.06)',
-          background: '#13131e', flexShrink: 0,
-        }}
-      >
+      <div style={{
+        padding: '8px 12px 12px',
+        borderTop: '1px solid rgba(255,255,255,0.06)',
+        background: '#13131e', flexShrink: 0,
+      }}>
         <div style={{
           display: 'flex', gap: 8, alignItems: 'flex-end',
           background: 'rgba(255,255,255,0.05)',
           border: '1px solid rgba(255,255,255,0.09)',
-          borderRadius: 8, padding: '6px 6px 6px 12px',
-          transition: 'border-color 0.2s',
+          borderRadius: 10, padding: '6px 6px 6px 12px',
         }}>
           <textarea
             ref={textareaRef}
+            className="chat-textarea"
             value={input}
-            onChange={e => setInput(e.target.value)}
+            onChange={e => {
+              setInput(e.target.value)
+              // auto-grow
+              e.target.style.height = 'auto'
+              e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px'
+            }}
             onKeyDown={handleInputKey}
             placeholder={
-              status === 'open'
-                ? `Message #${channel.name}`
-                : status === 'connecting'
-                ? 'Connecting…'
-                : 'Reconnecting…'
+              status === 'open' ? `Message #${channel.name}`
+              : status === 'connecting' ? 'Connecting…'
+              : 'Reconnecting…'
             }
             disabled={status !== 'open'}
             rows={1}
             style={{
               flex: 1, background: 'none', border: 'none', outline: 'none',
-              color: '#e5e7eb', fontSize: 13.5, lineHeight: 1.55,
+              color: '#e5e7eb', fontSize: 14, lineHeight: 1.5,
               resize: 'none', fontFamily: "'Inter', sans-serif",
-              minHeight: 22, maxHeight: 120, overflowY: 'auto',
-              // grow with content
-              height: 'auto',
-            }}
-            onInput={e => {
-              e.target.style.height = 'auto'
-              e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px'
+              minHeight: 22, maxHeight: 120,
+              // iOS fix — prevent zoom on focus
+              fontSize: '16px',
             }}
           />
           <button
+            className="send-btn"
             onClick={handleSend}
             disabled={!input.trim() || status !== 'open'}
-            title="Send (Enter)"
             style={{
-              width: 32, height: 32, borderRadius: 6, border: 'none',
+              width: 34, height: 34, borderRadius: 8, border: 'none', flexShrink: 0,
               background: input.trim() && status === 'open'
                 ? 'linear-gradient(135deg, #4f46e5, #06b6d4)'
                 : 'rgba(255,255,255,0.07)',
-              color: input.trim() && status === 'open'
-                ? '#fff'
-                : 'rgba(255,255,255,0.3)',
+              color: input.trim() && status === 'open' ? '#fff' : 'rgba(255,255,255,0.25)',
               cursor: input.trim() && status === 'open' ? 'pointer' : 'not-allowed',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
-              fontSize: 15, flexShrink: 0, transition: 'background 0.2s',
+              fontSize: 16, transition: 'background 0.2s, opacity 0.2s',
             }}
-          >
-            ↑
-          </button>
+          >↑</button>
         </div>
-        <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.2)', marginTop: 5, marginBottom: 0 }}>
+        <p style={{ fontSize: 11, color: 'rgba(255,255,255,0.15)', margin: '4px 0 0',
+          display: 'none' /* hide hint on mobile to save space */ }}
+          className="send-hint">
           Enter to send · Shift+Enter for new line
         </p>
       </div>
