@@ -1,14 +1,9 @@
 /**
  * src/pages/LoginPage.jsx
  *
- * Responsibilities:
- *  1. Renders a login form (username + password).
- *  2. On submit: calls AuthContext.loginUser() which hits POST /auth/login.
- *  3. On success: navigates to the page the user originally wanted, or /dashboard.
- *  4. On failure: displays the error message from the API.
- *
- * The component is intentionally "dumb" about HTTP — all networking lives in
- * AuthContext and authService.js.
+ * FIX (Bug 6): Inputs had `outline: none` with no :focus replacement.
+ * Inline styles can't express pseudo-classes, so focus was invisible.
+ * Fixed by injecting a <style> block for the focus ring instead.
  */
 
 import { useState } from 'react'
@@ -20,18 +15,15 @@ export default function LoginPage() {
   const navigate = useNavigate()
   const location = useLocation()
 
-  // Where should we go after a successful login?
-  // If the user was redirected here from a protected route, go back there.
   const from = location.state?.from?.pathname ?? '/dashboard'
 
-  const [formData, setFormData] = useState({ username: '', password: '' })
-  const [error, setError] = useState('')
+  const [formData, setFormData]     = useState({ username: '', password: '' })
+  const [error, setError]           = useState('')
   const [isSubmitting, setIsSubmitting] = useState(false)
 
   function handleChange(e) {
     const { name, value } = e.target
-    setFormData((prev) => ({ ...prev, [name]: value }))
-    // Clear the error as soon as the user starts correcting their input
+    setFormData(prev => ({ ...prev, [name]: value }))
     if (error) setError('')
   }
 
@@ -39,18 +31,15 @@ export default function LoginPage() {
     e.preventDefault()
     setIsSubmitting(true)
     setError('')
-
     try {
       await loginUser(formData.username, formData.password)
       navigate(from, { replace: true })
     } catch (err) {
-      // FastAPI returns error details in err.response.data.detail
       const detail = err.response?.data?.detail
       if (typeof detail === 'string') {
         setError(detail)
       } else if (Array.isArray(detail)) {
-        // Pydantic validation errors come as an array of objects
-        setError(detail.map((d) => d.msg).join(', '))
+        setError(detail.map(d => d.msg).join(', '))
       } else {
         setError('Login failed. Please check your credentials.')
       }
@@ -61,42 +50,91 @@ export default function LoginPage() {
 
   return (
     <div style={styles.page}>
+      {/* ── Focus ring styles — inline styles can't do :focus ── */}
+      <style>{`
+        .tele-input {
+          background: rgba(255,255,255,0.06);
+          border: 1px solid rgba(255,255,255,0.12);
+          border-radius: 6px;
+          color: #e5e7eb;
+          font-size: 0.95rem;
+          padding: 0.65rem 0.85rem;
+          outline: none;
+          transition: border-color 0.18s, box-shadow 0.18s;
+          font-family: inherit;
+          width: 100%;
+          box-sizing: border-box;
+        }
+        .tele-input:focus {
+          border-color: rgba(99,102,241,0.7);
+          box-shadow: 0 0 0 3px rgba(99,102,241,0.18);
+        }
+        .tele-input:disabled {
+          opacity: 0.5;
+          cursor: not-allowed;
+        }
+        .tele-btn {
+          margin-top: 1.5rem;
+          padding: 0.75rem;
+          background: linear-gradient(135deg, #4f46e5, #06b6d4);
+          border: none;
+          border-radius: 6px;
+          color: #fff;
+          font-size: 0.95rem;
+          font-weight: 600;
+          cursor: pointer;
+          letter-spacing: 0.02em;
+          transition: opacity 0.2s, box-shadow 0.2s;
+          font-family: inherit;
+          width: 100%;
+        }
+        .tele-btn:hover:not(:disabled) {
+          opacity: 0.92;
+          box-shadow: 0 4px 20px rgba(79,70,229,0.35);
+        }
+        .tele-btn:focus-visible {
+          outline: 2px solid rgba(99,102,241,0.8);
+          outline-offset: 2px;
+        }
+        .tele-btn:disabled {
+          opacity: 0.55;
+          cursor: not-allowed;
+        }
+      `}</style>
+
       <div style={styles.card}>
-        {/* ── Header ── */}
+        {/* Header */}
         <div style={styles.header}>
           <div style={styles.logoMark}>T</div>
           <h1 style={styles.title}>teleSUST</h1>
           <p style={styles.subtitle}>Sign in to continue</p>
         </div>
 
-        {/* ── Error banner ── */}
+        {/* Error banner */}
         {error && (
           <div style={styles.errorBanner} role="alert">
             <span style={styles.errorIcon}>⚠</span> {error}
           </div>
         )}
 
-        {/* ── Form ── */}
+        {/* Form */}
         <form onSubmit={handleSubmit} style={styles.form} noValidate>
-          <label style={styles.label} htmlFor="username">
-            Username
-          </label>
+          <label style={styles.label} htmlFor="username">Username</label>
           <input
             id="username"
             name="username"
             type="text"
             autoComplete="username"
             required
+            autoFocus
             placeholder="your_username"
             value={formData.username}
             onChange={handleChange}
-            style={styles.input}
+            className="tele-input"
             disabled={isSubmitting}
           />
 
-          <label style={styles.label} htmlFor="password">
-            Password
-          </label>
+          <label style={styles.label} htmlFor="password">Password</label>
           <input
             id="password"
             name="password"
@@ -106,30 +144,24 @@ export default function LoginPage() {
             placeholder="••••••••"
             value={formData.password}
             onChange={handleChange}
-            style={styles.input}
+            className="tele-input"
             disabled={isSubmitting}
           />
 
-          <button type="submit" style={styles.button} disabled={isSubmitting}>
+          <button type="submit" className="tele-btn" disabled={isSubmitting}>
             {isSubmitting ? 'Signing in…' : 'Sign In'}
           </button>
         </form>
 
-        {/* ── Footer link ── */}
+        {/* Footer */}
         <p style={styles.footerText}>
           Don&apos;t have an account?{' '}
-          <Link to="/register" style={styles.link}>
-            Register
-          </Link>
+          <Link to="/register" style={styles.link}>Register</Link>
         </p>
       </div>
     </div>
   )
 }
-
-// ── Inline styles ──────────────────────────────────────────────────────────
-// Inline styles keep this file self-contained. For a larger project,
-// move these to a CSS Module (LoginPage.module.css) or Tailwind classes.
 
 const styles = {
   page: {
@@ -151,10 +183,7 @@ const styles = {
     boxShadow: '0 25px 50px rgba(0,0,0,0.5)',
     backdropFilter: 'blur(12px)',
   },
-  header: {
-    textAlign: 'center',
-    marginBottom: '2rem',
-  },
+  header: { textAlign: 'center', marginBottom: '2rem' },
   logoMark: {
     display: 'inline-flex',
     alignItems: 'center',
@@ -175,11 +204,7 @@ const styles = {
     margin: '0 0 0.25rem',
     letterSpacing: '-0.02em',
   },
-  subtitle: {
-    color: '#6b7280',
-    fontSize: '0.875rem',
-    margin: 0,
-  },
+  subtitle: { color: '#6b7280', fontSize: '0.875rem', margin: 0 },
   errorBanner: {
     background: 'rgba(239,68,68,0.15)',
     border: '1px solid rgba(239,68,68,0.35)',
@@ -192,14 +217,8 @@ const styles = {
     alignItems: 'center',
     gap: '0.5rem',
   },
-  errorIcon: {
-    flexShrink: 0,
-  },
-  form: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '0.35rem',
-  },
+  errorIcon: { flexShrink: 0 },
+  form: { display: 'flex', flexDirection: 'column', gap: '0.35rem' },
   label: {
     color: '#9ca3af',
     fontSize: '0.78rem',
@@ -208,31 +227,6 @@ const styles = {
     letterSpacing: '0.07em',
     marginTop: '0.75rem',
   },
-  input: {
-    background: 'rgba(255,255,255,0.06)',
-    border: '1px solid rgba(255,255,255,0.12)',
-    borderRadius: '6px',
-    color: '#e5e7eb',
-    fontSize: '0.95rem',
-    padding: '0.65rem 0.85rem',
-    outline: 'none',
-    transition: 'border-color 0.2s',
-    fontFamily: 'inherit',
-  },
-  button: {
-    marginTop: '1.5rem',
-    padding: '0.75rem',
-    background: 'linear-gradient(135deg, #4f46e5, #06b6d4)',
-    border: 'none',
-    borderRadius: '6px',
-    color: '#fff',
-    fontSize: '0.95rem',
-    fontWeight: 600,
-    cursor: 'pointer',
-    letterSpacing: '0.02em',
-    transition: 'opacity 0.2s',
-    fontFamily: 'inherit',
-  },
   footerText: {
     textAlign: 'center',
     color: '#6b7280',
@@ -240,9 +234,5 @@ const styles = {
     marginTop: '1.5rem',
     marginBottom: 0,
   },
-  link: {
-    color: '#06b6d4',
-    textDecoration: 'none',
-    fontWeight: 500,
-  },
+  link: { color: '#06b6d4', textDecoration: 'none', fontWeight: 500 },
 }
