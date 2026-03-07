@@ -21,14 +21,9 @@ import api from './api'
  * @returns {Promise<{ access_token: string, token_type: string }>}
  */
 export async function login(username, password) {
-  // FormData serialises as application/x-www-form-urlencoded automatically
-  const form = new URLSearchParams()
-  form.append('username', username)
-  form.append('password', password)
-
-  const response = await api.post('/auth/login', form, {
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-  })
+  // Send a plain JSON object — matches LoginRequest schema exactly.
+  // Axios defaults to Content-Type: application/json, no manual header needed.
+  const response = await api.post('/auth/login', { username, password })
   return response.data
 }
 
