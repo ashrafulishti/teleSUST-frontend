@@ -1,34 +1,23 @@
 /**
  * src/context/AuthContext.jsx
  *
- * Provides global authentication state to the entire React tree.
+ * FIX (Problem 4): After login, call GET /auth/me to get the real user
+ * object (id, username, email, is_admin, is_active) instead of relying
+ * on decodeTokenPayload(), which only gives sub/iat/exp from the JWT and
+ * never contains username.
  *
- * What it does:
- *  1. Reads a persisted token from localStorage on first render so the user
- *     stays logged in across page refreshes.
- *  2. Exposes `user`, `token`, `isAuthenticated`, `isLoading`.
- *  3. Exposes `loginUser()` and `logoutUser()` actions that components call.
- *
- * Usage:
- *   // Wrap your app (done in main.jsx):
- *   <AuthProvider><App /></AuthProvider>
- *
- *   // Consume anywhere:
- *   const { user, isAuthenticated, loginUser, logoutUser } = useAuth()
+ * Also fixes session restore on page refresh — we now re-fetch /auth/me
+ * on mount when a stored token is found, so the user object is always
+ * fresh and complete (not a stale localStorage blob).
  */
 
 import { createContext, useContext, useEffect, useState, useCallback } from 'react'
-import { login as apiLogin } from '../services/authService'
-
-// ── Context creation ───────────────────────────────────────────────────────
+import { login as apiLogin, getMe } from '../services/authService'
 
 const AuthContext = createContext(null)
 
-// ── Storage helpers ────────────────────────────────────────────────────────
-// Centralising localStorage keys avoids typo bugs scattered around the app.
-
 const TOKEN_KEY = 'access_token'
-const USER_KEY = 'user'
+const USER_KEY  = 'user'
 
 function persistSession(token, user) {
   localStorage.setItem(TOKEN_KEY, token)
@@ -40,69 +29,75 @@ function clearSession() {
   localStorage.removeItem(USER_KEY)
 }
 
-function readSession() {
-  const token = localStorage.getItem(TOKEN_KEY)
-  const rawUser = localStorage.getItem(USER_KEY)
-  const user = rawUser ? JSON.parse(rawUser) : null
-  return { token, user }
+function readToken() {
+  return localStorage.getItem(TOKEN_KEY)
 }
 
 // ── Provider ───────────────────────────────────────────────────────────────
 
 export function AuthProvider({ children }) {
-  const [token, setToken] = useState(null)
-  const [user, setUser] = useState(null)
-  // isLoading is true during the initial "restore session" phase so that
-  // ProtectedRoute doesn't flash the login page on refresh.
+  const [token,     setToken]     = useState(null)
+  const [user,      setUser]      = useState(null)
   const [isLoading, setIsLoading] = useState(true)
 
-  // Restore session from localStorage on mount (runs once)
+  // ── Restore session on mount ─────────────────────────────────────────────
+  // Re-fetch /auth/me instead of trusting the localStorage user blob.
+  // This guarantees the user object is always complete and up-to-date
+  // (username, email, is_admin — none of which live in the JWT payload).
   useEffect(() => {
-    const { token: savedToken, user: savedUser } = readSession()
-    if (savedToken && savedUser) {
-      setToken(savedToken)
-      setUser(savedUser)
+    const savedToken = readToken()
+    if (!savedToken) {
+      setIsLoading(false)
+      return
     }
-    setIsLoading(false)
+
+    // Optimistically set the token so the Axios interceptor can attach it
+    setToken(savedToken)
+
+    getMe()
+      .then(freshUser => {
+        setUser(freshUser)
+        persistSession(savedToken, freshUser)
+      })
+      .catch(() => {
+        // Token is expired or invalid — clear everything
+        clearSession()
+        setToken(null)
+        setUser(null)
+      })
+      .finally(() => {
+        setIsLoading(false)
+      })
   }, [])
 
-  /**
-   * loginUser — called by LoginPage after the user submits the form.
-   *
-   * @param {string} username
-   * @param {string} password
-   * @throws Will re-throw any Axios error so the form can display it.
-   */
-  const loginUser = useCallback(async (username, password) => {
-    // Call the FastAPI /auth/login endpoint
-    const data = await apiLogin(username, password)
-    // data = { access_token: "...", token_type: "bearer" }
+  // ── loginUser ────────────────────────────────────────────────────────────
 
+  const loginUser = useCallback(async (username, password) => {
+    // 1. Exchange credentials for a JWT
+    const data     = await apiLogin(username, password)
     const newToken = data.access_token
 
-    // Build a minimal user object from the token.
-    // If your backend also returns a user object, use that instead.
-    // e.g. if data.user exists: const newUser = data.user
-    const newUser = decodeTokenPayload(newToken)
-
-    // Update React state
+    // Persist token first so the Axios interceptor can attach it
+    // to the immediately-following /auth/me request
+    localStorage.setItem(TOKEN_KEY, newToken)
     setToken(newToken)
-    setUser(newUser)
 
-    // Persist so the session survives a browser refresh
-    persistSession(newToken, newUser)
+    // 2. Fetch the full user profile — this is the ONLY reliable way
+    //    to get username/email/is_admin (they are NOT in the JWT payload)
+    const fullUser = await getMe()
 
-    return newUser
+    setUser(fullUser)
+    persistSession(newToken, fullUser)
+
+    return fullUser
   }, [])
 
-  /**
-   * logoutUser — clears all auth state.
-   */
+  // ── logoutUser ───────────────────────────────────────────────────────────
+
   const logoutUser = useCallback(() => {
     setToken(null)
     setUser(null)
     clearSession()
-    // Navigation is handled by the caller (e.g. navigate('/login'))
   }, [])
 
   const value = {
@@ -119,33 +114,8 @@ export function AuthProvider({ children }) {
 
 // ── Consumer hook ──────────────────────────────────────────────────────────
 
-/**
- * useAuth — shorthand hook to consume AuthContext.
- *
- * Throws a helpful error if used outside <AuthProvider> so bugs surface
- * immediately during development rather than as cryptic null-reference errors.
- */
 export function useAuth() {
   const ctx = useContext(AuthContext)
-  if (!ctx) {
-    throw new Error('useAuth must be used inside <AuthProvider>')
-  }
+  if (!ctx) throw new Error('useAuth must be used inside <AuthProvider>')
   return ctx
-}
-
-// ── Helpers ────────────────────────────────────────────────────────────────
-
-/**
- * Decode the JWT payload (the middle Base64 segment) without verifying
- * the signature — verification happens on the server.
- * Returns an object with the claims, or an empty object on failure.
- */
-function decodeTokenPayload(token) {
-  try {
-    const base64Payload = token.split('.')[1]
-    const jsonStr = atob(base64Payload.replace(/-/g, '+').replace(/_/g, '/'))
-    return JSON.parse(jsonStr)
-  } catch {
-    return {}
-  }
 }
