@@ -1,24 +1,20 @@
 /**
  * src/pages/DashboardPage.jsx
  *
- * Mobile-first responsive layout:
- *
- * Desktop (≥768px): Three-column layout — Groups | Channels | Chat
- *
- * Mobile (<768px):  Single-column with a bottom tab bar.
- *   Tab 1 → Groups list
- *   Tab 2 → Channels list (only active when a group is selected)
- *   Tab 3 → Chat panel (only active when a channel is selected)
- *   Selecting a group auto-navigates to Channels tab.
- *   Selecting a channel auto-navigates to Chat tab.
- *
  * Fixes:
- * - Messages not visible: ChatPanel now receives correct currentUser object
- *   from GET /auth/me (has .id not .sub)
- * - Token passed correctly to ChatPanel so WS connects
+ * 1. Groups reload properly after logout/login — useEffect depends on
+ *    isAuthenticated so it re-fetches when the user logs back in.
+ *    Groups state is also cleared on logout.
+ *
+ * 2. channel.id passed to ChatPanel is always a string — UUID objects
+ *    would produce "[object Object]" in the WebSocket URL.
+ *
+ * 3. Join group UX — group cards now show a "Copy ID" button so the
+ *    creator can share the UUID. The join modal also has a hint explaining
+ *    what the Group ID is.
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useAuth } from '../context/AuthContext'
 import ChatPanel from '../components/ChatPanel'
 import {
@@ -51,11 +47,7 @@ function Modal({ title, onClose, onSubmit, submitLabel = 'Submit', loading = fal
           <h3 style={{ color: '#f0f0f5', fontSize: 15, fontWeight: 700, margin: 0 }}>{title}</h3>
           <button onClick={onClose} style={closeBtn}>✕</button>
         </div>
-
-        {error && (
-          <div style={errorBox}><span>⚠</span> {error}</div>
-        )}
-
+        {error && <div style={errorBox}><span>⚠</span> {error}</div>}
         <form onSubmit={onSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           {children}
           <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
@@ -70,11 +62,12 @@ function Modal({ title, onClose, onSubmit, submitLabel = 'Submit', loading = fal
   )
 }
 
-function ModalInput({ label, ...props }) {
+function ModalInput({ label, hint, ...props }) {
   return (
     <div>
       {label && <label style={labelStyle}>{label}</label>}
       <input style={inputStyle} {...props} />
+      {hint && <p style={{ margin: '4px 0 0', fontSize: 11, color: 'rgba(255,255,255,0.25)' }}>{hint}</p>}
     </div>
   )
 }
@@ -82,7 +75,17 @@ function ModalInput({ label, ...props }) {
 // ── Group item ────────────────────────────────────────────────────────────────
 
 function GroupItem({ group, selected, onClick }) {
+  const [copied, setCopied] = useState(false)
   const letter = group.name?.[0]?.toUpperCase() ?? '?'
+
+  function copyId(e) {
+    e.stopPropagation()
+    navigator.clipboard.writeText(group.id).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    })
+  }
+
   return (
     <div onClick={onClick} style={{
       display: 'flex', alignItems: 'center', gap: 10,
@@ -95,20 +98,35 @@ function GroupItem({ group, selected, onClick }) {
         width: 36, height: 36, borderRadius: 10, flexShrink: 0,
         background: selected ? 'rgba(99,102,241,0.3)' : 'rgba(255,255,255,0.07)',
         display: 'flex', alignItems: 'center', justifyContent: 'center',
-        fontSize: 16, fontWeight: 700, color: selected ? '#a5b4fc' : 'rgba(255,255,255,0.5)',
+        fontSize: 16, fontWeight: 700,
+        color: selected ? '#a5b4fc' : 'rgba(255,255,255,0.5)',
       }}>{letter}</div>
       <div style={{ flex: 1, minWidth: 0 }}>
-        <p style={{ margin: 0, fontSize: 13, fontWeight: 600,
+        <p style={{
+          margin: 0, fontSize: 13, fontWeight: 600,
           color: selected ? '#a5b4fc' : 'rgba(255,255,255,0.8)',
-          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {group.name}
-        </p>
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}>{group.name}</p>
         {group.member_count != null && (
           <p style={{ margin: 0, fontSize: 11, color: 'rgba(255,255,255,0.25)' }}>
             {group.member_count} member{group.member_count !== 1 ? 's' : ''}
           </p>
         )}
       </div>
+      {/* Copy ID button — lets creator share group UUID with others */}
+      <button
+        onClick={copyId}
+        title="Copy group ID to share with others"
+        style={{
+          flexShrink: 0, background: 'none', border: 'none',
+          color: copied ? '#22c55e' : 'rgba(255,255,255,0.2)',
+          cursor: 'pointer', fontSize: 11, padding: '2px 4px',
+          borderRadius: 4, fontFamily: "'Inter', sans-serif",
+          transition: 'color 0.2s',
+        }}
+      >
+        {copied ? '✓' : '⎘'}
+      </button>
     </div>
   )
 }
@@ -136,26 +154,21 @@ function ChannelItem({ channel, selected, onClick }) {
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function DashboardPage() {
-  const { user, token, logoutUser } = useAuth()
+  const { user, token, logoutUser, isAuthenticated } = useAuth()
   const isMobile = useIsMobile()
 
-  // Data state
-  const [groups,          setGroups]          = useState([])
-  const [channels,        setChannels]        = useState([])
-  const [selectedGroup,   setSelectedGroup]   = useState(null)
-  const [selectedChannel, setSelectedChannel] = useState(null)
-  const [loadingGroups,   setLoadingGroups]   = useState(true)
-  const [loadingChannels, setLoadingChannels] = useState(false)
+  const [groups,           setGroups]           = useState([])
+  const [channels,         setChannels]         = useState([])
+  const [selectedGroup,    setSelectedGroup]    = useState(null)
+  const [selectedChannel,  setSelectedChannel]  = useState(null)
+  const [loadingGroups,    setLoadingGroups]    = useState(false)
+  const [loadingChannels,  setLoadingChannels]  = useState(false)
+  const [mobileTab,        setMobileTab]        = useState('groups')
 
-  // Mobile tab: 'groups' | 'channels' | 'chat'
-  const [mobileTab, setMobileTab] = useState('groups')
+  const [modal,        setModal]        = useState(null)
+  const [modalError,   setModalError]   = useState('')
+  const [modalLoading, setModalLoading] = useState(false)
 
-  // Modal state
-  const [modal,       setModal]       = useState(null) // 'createGroup'|'joinGroup'|'createChannel'
-  const [modalError,  setModalError]  = useState('')
-  const [modalLoading,setModalLoading]= useState(false)
-
-  // Modal fields
   const [newGroupName,     setNewGroupName]     = useState('')
   const [newGroupDesc,     setNewGroupDesc]     = useState('')
   const [newGroupPassword, setNewGroupPassword] = useState('')
@@ -164,19 +177,26 @@ export default function DashboardPage() {
   const [newChannelName,   setNewChannelName]   = useState('')
   const [newChannelTopic,  setNewChannelTopic]  = useState('')
 
-  // ── Load groups ─────────────────────────────────────────────────────────────
+  // ── FIX 1: Load groups whenever auth state changes ───────────────────────
+  // Previously this only ran on mount, so after logout→login the groups
+  // list was empty because the effect never re-fired.
   useEffect(() => {
-    async function load() {
-      try {
-        const data = await getGroups()
-        setGroups(data.groups ?? [])
-      } catch { /* handled by interceptor */ }
-      finally { setLoadingGroups(false) }
+    if (!isAuthenticated) {
+      // Clear everything on logout
+      setGroups([])
+      setChannels([])
+      setSelectedGroup(null)
+      setSelectedChannel(null)
+      return
     }
-    load()
-  }, [])
+    setLoadingGroups(true)
+    getGroups()
+      .then(data => setGroups(data.groups ?? []))
+      .catch(() => {})
+      .finally(() => setLoadingGroups(false))
+  }, [isAuthenticated])
 
-  // ── Load channels when group changes ────────────────────────────────────────
+  // ── Load channels when group changes ─────────────────────────────────────
   useEffect(() => {
     if (!selectedGroup) { setChannels([]); setSelectedChannel(null); return }
     setLoadingChannels(true)
@@ -197,7 +217,7 @@ export default function DashboardPage() {
     if (isMobile) setMobileTab('chat')
   }
 
-  // ── Modal helpers ───────────────────────────────────────────────────────────
+  // ── Modal helpers ─────────────────────────────────────────────────────────
   function openModal(name) {
     setModal(name); setModalError('')
     setNewGroupName(''); setNewGroupDesc(''); setNewGroupPassword('')
@@ -258,19 +278,17 @@ export default function DashboardPage() {
     } finally { setModalLoading(false) }
   }
 
-  // ── Panels ──────────────────────────────────────────────────────────────────
+  // ── Panels ────────────────────────────────────────────────────────────────
 
   const GroupsPanel = (
     <div style={{ ...panel, borderRight: isMobile ? 'none' : '1px solid rgba(255,255,255,0.06)' }}>
-      {/* Header */}
       <div style={panelHeader}>
         <span style={panelTitle}>Groups</span>
         <div style={{ display: 'flex', gap: 4 }}>
-          <button onClick={() => openModal('joinGroup')}  style={iconBtn} title="Join group">＋</button>
+          <button onClick={() => openModal('joinGroup')}   style={iconBtn}       title="Join group">＋</button>
           <button onClick={() => openModal('createGroup')} style={iconBtnAccent} title="Create group">✦</button>
         </div>
       </div>
-      {/* List */}
       <div style={panelBody}>
         {loadingGroups && <p style={dimText}>Loading…</p>}
         {!loadingGroups && groups.length === 0 && (
@@ -280,17 +298,21 @@ export default function DashboardPage() {
           </div>
         )}
         {groups.map(g => (
-          <GroupItem key={g.id} group={g} selected={selectedGroup?.id === g.id} onClick={() => selectGroup(g)} />
+          <GroupItem
+            key={g.id}
+            group={g}
+            selected={selectedGroup?.id === g.id}
+            onClick={() => selectGroup(g)}
+          />
         ))}
       </div>
-      {/* User footer */}
       <div style={userFooter}>
         <div style={userAvatar}>{user?.username?.[0]?.toUpperCase() ?? '?'}</div>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <p style={{ margin: 0, fontSize: 13, fontWeight: 600, color: 'rgba(255,255,255,0.8)',
-            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {user?.username ?? '…'}
-          </p>
+          <p style={{
+            margin: 0, fontSize: 13, fontWeight: 600, color: 'rgba(255,255,255,0.8)',
+            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+          }}>{user?.username ?? '…'}</p>
         </div>
         <button onClick={logoutUser} style={logoutBtn} title="Logout">⏻</button>
       </div>
@@ -308,7 +330,7 @@ export default function DashboardPage() {
         )}
       </div>
       <div style={panelBody}>
-        {!selectedGroup && <p style={dimText}>Select a group first.</p>}
+        {!selectedGroup    && <p style={dimText}>Select a group first.</p>}
         {selectedGroup && loadingChannels && <p style={dimText}>Loading…</p>}
         {selectedGroup && !loadingChannels && channels.length === 0 && (
           <div style={{ textAlign: 'center', padding: '2rem 1rem' }}>
@@ -317,26 +339,34 @@ export default function DashboardPage() {
           </div>
         )}
         {channels.map(ch => (
-          <ChannelItem key={ch.id} channel={ch} selected={selectedChannel?.id === ch.id} onClick={() => selectChannel(ch)} />
+          <ChannelItem
+            key={ch.id}
+            channel={ch}
+            selected={selectedChannel?.id === ch.id}
+            onClick={() => selectChannel(ch)}
+          />
         ))}
       </div>
     </div>
   )
 
+  // FIX 2: channel.id always passed as string to avoid "[object Object]" in WS URL
   const ChatArea = (
     <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       {selectedChannel && token ? (
         <ChatPanel
-          key={selectedChannel.id}
-          channel={selectedChannel}
+          key={String(selectedChannel.id)}
+          channel={{ ...selectedChannel, id: String(selectedChannel.id) }}
           token={token}
           currentUser={user}
         />
       ) : (
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column',
+        <div style={{
+          flex: 1, display: 'flex', flexDirection: 'column',
           alignItems: 'center', justifyContent: 'center',
           background: '#0e0e14', color: 'rgba(255,255,255,0.15)',
-          fontFamily: "'Inter', sans-serif", gap: 10, padding: '2rem' }}>
+          fontFamily: "'Inter', sans-serif", gap: 10, padding: '2rem',
+        }}>
           <div style={{ fontSize: 48 }}>💬</div>
           <p style={{ fontSize: 14, fontWeight: 500, margin: 0 }}>
             {selectedGroup ? 'Select a channel to start chatting' : 'Select a group to get started'}
@@ -346,7 +376,7 @@ export default function DashboardPage() {
     </div>
   )
 
-  // ── Desktop layout ──────────────────────────────────────────────────────────
+  // ── Desktop layout ────────────────────────────────────────────────────────
   if (!isMobile) {
     return (
       <div style={{ display: 'flex', height: '100vh', overflow: 'hidden', background: '#0e0e14', fontFamily: "'Inter', sans-serif" }}>
@@ -357,36 +387,32 @@ export default function DashboardPage() {
           {ChannelsPanel}
         </div>
         {ChatArea}
-        {modal && <Modals {...{ modal, closeModal, modalError, modalLoading,
+        {modal && <Modals {...{
+          modal, closeModal, modalError, modalLoading,
           newGroupName, setNewGroupName, newGroupDesc, setNewGroupDesc,
           newGroupPassword, setNewGroupPassword, handleCreateGroup,
           joinGroupId, setJoinGroupId, joinGroupPwd, setJoinGroupPwd, handleJoinGroup,
           newChannelName, setNewChannelName, newChannelTopic, setNewChannelTopic, handleCreateChannel,
-          selectedGroup }} />}
+          selectedGroup,
+        }} />}
       </div>
     )
   }
 
-  // ── Mobile layout ───────────────────────────────────────────────────────────
+  // ── Mobile layout ─────────────────────────────────────────────────────────
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden',
-      background: '#0e0e14', fontFamily: "'Inter', sans-serif" }}>
-
-      {/* Main content area */}
-      <div style={{ flex: 1, minHeight: 0, overflow: 'hidden', position: 'relative' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden', background: '#0e0e14', fontFamily: "'Inter', sans-serif" }}>
+      <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
         {mobileTab === 'groups'   && <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>{GroupsPanel}</div>}
         {mobileTab === 'channels' && <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>{ChannelsPanel}</div>}
         {mobileTab === 'chat'     && <div style={{ height: '100%', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>{ChatArea}</div>}
       </div>
 
       {/* Bottom tab bar */}
-      <div style={{
-        display: 'flex', borderTop: '1px solid rgba(255,255,255,0.08)',
-        background: '#13131e', flexShrink: 0,
-      }}>
+      <div style={{ display: 'flex', borderTop: '1px solid rgba(255,255,255,0.08)', background: '#13131e', flexShrink: 0 }}>
         {[
           { key: 'groups',   label: 'Groups',   icon: '⊞' },
-          { key: 'channels', label: 'Channels', icon: '#', disabled: !selectedGroup },
+          { key: 'channels', label: 'Channels', icon: '#',  disabled: !selectedGroup },
           { key: 'chat',     label: 'Chat',     icon: '💬', disabled: !selectedChannel },
         ].map(tab => (
           <button
@@ -403,20 +429,22 @@ export default function DashboardPage() {
             }}
           >
             <span style={{ fontSize: 18 }}>{tab.icon}</span>
-            <span style={{ fontSize: 10, fontWeight: mobileTab === tab.key ? 600 : 400,
-              color: mobileTab === tab.key ? '#818cf8' : 'rgba(255,255,255,0.4)' }}>
-              {tab.label}
-            </span>
+            <span style={{
+              fontSize: 10, fontWeight: mobileTab === tab.key ? 600 : 400,
+              color: mobileTab === tab.key ? '#818cf8' : 'rgba(255,255,255,0.4)',
+            }}>{tab.label}</span>
           </button>
         ))}
       </div>
 
-      {modal && <Modals {...{ modal, closeModal, modalError, modalLoading,
+      {modal && <Modals {...{
+        modal, closeModal, modalError, modalLoading,
         newGroupName, setNewGroupName, newGroupDesc, setNewGroupDesc,
         newGroupPassword, setNewGroupPassword, handleCreateGroup,
         joinGroupId, setJoinGroupId, joinGroupPwd, setJoinGroupPwd, handleJoinGroup,
         newChannelName, setNewChannelName, newChannelTopic, setNewChannelTopic, handleCreateChannel,
-        selectedGroup }} />}
+        selectedGroup,
+      }} />}
     </div>
   )
 }
@@ -427,20 +455,25 @@ function Modals(p) {
   if (p.modal === 'createGroup') return (
     <Modal title="Create Group" onClose={p.closeModal} onSubmit={p.handleCreateGroup}
       submitLabel="Create" loading={p.modalLoading} error={p.modalError}>
-      <ModalInput label="Group name *" placeholder="e.g. Study Room" value={p.newGroupName}
-        onChange={e => p.setNewGroupName(e.target.value)} required />
-      <ModalInput label="Description" placeholder="Optional" value={p.newGroupDesc}
-        onChange={e => p.setNewGroupDesc(e.target.value)} />
-      <ModalInput label="Join password * (min 4 chars)" type="password" placeholder="Password for others to join"
-        value={p.newGroupPassword} onChange={e => p.setNewGroupPassword(e.target.value)} required minLength={4} />
+      <ModalInput label="Group name *" placeholder="e.g. Study Room"
+        value={p.newGroupName} onChange={e => p.setNewGroupName(e.target.value)} required />
+      <ModalInput label="Description" placeholder="Optional"
+        value={p.newGroupDesc} onChange={e => p.setNewGroupDesc(e.target.value)} />
+      <ModalInput label="Join password * (min 4 chars)" type="password"
+        placeholder="Others need this to join"
+        value={p.newGroupPassword} onChange={e => p.setNewGroupPassword(e.target.value)}
+        required minLength={4} />
     </Modal>
   )
 
   if (p.modal === 'joinGroup') return (
     <Modal title="Join Group" onClose={p.closeModal} onSubmit={p.handleJoinGroup}
       submitLabel="Join" loading={p.modalLoading} error={p.modalError}>
-      <ModalInput label="Group ID *" placeholder="Paste the group UUID" value={p.joinGroupId}
-        onChange={e => p.setJoinGroupId(e.target.value)} required />
+      <ModalInput
+        label="Group ID *"
+        placeholder="Paste the group ID here"
+        hint="Ask the group creator to click the ⎘ icon next to their group name to copy the ID"
+        value={p.joinGroupId} onChange={e => p.setJoinGroupId(e.target.value)} required />
       <ModalInput label="Join password *" type="password" placeholder="Group password"
         value={p.joinGroupPwd} onChange={e => p.setJoinGroupPwd(e.target.value)} required />
     </Modal>
@@ -448,11 +481,12 @@ function Modals(p) {
 
   if (p.modal === 'createChannel') return (
     <Modal title={`New channel in ${p.selectedGroup?.name}`} onClose={p.closeModal}
-      onSubmit={p.handleCreateChannel} submitLabel="Create" loading={p.modalLoading} error={p.modalError}>
-      <ModalInput label="Channel name *" placeholder="e.g. general" value={p.newChannelName}
-        onChange={e => p.setNewChannelName(e.target.value)} required />
-      <ModalInput label="Topic" placeholder="Optional topic" value={p.newChannelTopic}
-        onChange={e => p.setNewChannelTopic(e.target.value)} />
+      onSubmit={p.handleCreateChannel} submitLabel="Create"
+      loading={p.modalLoading} error={p.modalError}>
+      <ModalInput label="Channel name *" placeholder="e.g. general"
+        value={p.newChannelName} onChange={e => p.setNewChannelName(e.target.value)} required />
+      <ModalInput label="Topic" placeholder="Optional topic"
+        value={p.newChannelTopic} onChange={e => p.setNewChannelTopic(e.target.value)} />
     </Modal>
   )
 
@@ -461,88 +495,21 @@ function Modals(p) {
 
 // ── Shared styles ─────────────────────────────────────────────────────────────
 
-const panel = {
-  display: 'flex', flexDirection: 'column', height: '100%',
-  background: '#13131e', overflow: 'hidden',
-}
-const panelHeader = {
-  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-  padding: '12px 12px 8px', flexShrink: 0,
-  borderBottom: '1px solid rgba(255,255,255,0.05)',
-}
-const panelTitle = {
-  fontSize: 12, fontWeight: 700, letterSpacing: '0.08em',
-  color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase',
-  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-}
-const panelBody = {
-  flex: 1, overflowY: 'auto', padding: '6px 8px', display: 'flex', flexDirection: 'column', gap: 2,
-}
+const panel = { display: 'flex', flexDirection: 'column', height: '100%', background: '#13131e', overflow: 'hidden' }
+const panelHeader = { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 12px 8px', flexShrink: 0, borderBottom: '1px solid rgba(255,255,255,0.05)' }
+const panelTitle = { fontSize: 12, fontWeight: 700, letterSpacing: '0.08em', color: 'rgba(255,255,255,0.4)', textTransform: 'uppercase', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }
+const panelBody = { flex: 1, overflowY: 'auto', padding: '6px 8px', display: 'flex', flexDirection: 'column', gap: 2 }
 const dimText = { fontSize: 12, color: 'rgba(255,255,255,0.2)', textAlign: 'center', padding: '1rem 0' }
-const userFooter = {
-  display: 'flex', alignItems: 'center', gap: 8,
-  padding: '10px 12px', borderTop: '1px solid rgba(255,255,255,0.06)',
-  flexShrink: 0,
-}
-const userAvatar = {
-  width: 30, height: 30, borderRadius: '50%', flexShrink: 0,
-  background: 'rgba(99,102,241,0.25)', border: '1px solid rgba(99,102,241,0.4)',
-  display: 'flex', alignItems: 'center', justifyContent: 'center',
-  fontSize: 13, fontWeight: 700, color: '#a5b4fc',
-}
-const logoutBtn = {
-  background: 'none', border: 'none', color: 'rgba(255,255,255,0.3)',
-  cursor: 'pointer', fontSize: 16, padding: 4, borderRadius: 4,
-}
-const iconBtn = {
-  background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.08)',
-  borderRadius: 6, color: 'rgba(255,255,255,0.6)', cursor: 'pointer',
-  fontSize: 16, width: 28, height: 28, display: 'flex',
-  alignItems: 'center', justifyContent: 'center', padding: 0,
-}
-const iconBtnAccent = {
-  ...iconBtn,
-  background: 'rgba(99,102,241,0.15)', border: '1px solid rgba(99,102,241,0.3)',
-  color: '#818cf8',
-}
-const overlay = {
-  position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)',
-  backdropFilter: 'blur(6px)', display: 'flex', alignItems: 'center',
-  justifyContent: 'center', zIndex: 300, padding: '1rem',
-}
-const modalCard = {
-  background: '#1a1a28', border: '1px solid rgba(255,255,255,0.1)',
-  borderRadius: 14, padding: '20px', width: '100%', maxWidth: 380,
-  boxShadow: '0 25px 50px rgba(0,0,0,0.6)',
-}
-const closeBtn = {
-  background: 'none', border: 'none', color: 'rgba(255,255,255,0.4)',
-  cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 4,
-}
-const errorBox = {
-  display: 'flex', alignItems: 'center', gap: 8,
-  padding: '8px 12px', marginBottom: 12, borderRadius: 8,
-  background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.25)',
-  color: '#fca5a5', fontSize: 13,
-}
-const labelStyle = {
-  display: 'block', fontSize: 11, fontWeight: 500,
-  color: 'rgba(255,255,255,0.4)', marginBottom: 4, letterSpacing: '0.04em',
-}
-const inputStyle = {
-  width: '100%', boxSizing: 'border-box',
-  background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)',
-  borderRadius: 7, padding: '9px 12px', color: '#e5e7eb', fontSize: 13,
-  fontFamily: "'Inter', sans-serif", outline: 'none',
-}
-const submitBtnStyle = {
-  flex: 1, padding: '9px 0', background: 'linear-gradient(135deg, #4f46e5, #06b6d4)',
-  border: 'none', borderRadius: 7, color: '#fff', fontSize: 13,
-  fontWeight: 600, cursor: 'pointer', fontFamily: "'Inter', sans-serif",
-}
-const cancelBtnStyle = {
-  flex: 1, padding: '9px 0', background: 'rgba(255,255,255,0.05)',
-  border: '1px solid rgba(255,255,255,0.08)', borderRadius: 7,
-  color: 'rgba(255,255,255,0.5)', fontSize: 13, cursor: 'pointer',
-  fontFamily: "'Inter', sans-serif",
-}
+const userFooter = { display: 'flex', alignItems: 'center', gap: 8, padding: '10px 12px', borderTop: '1px solid rgba(255,255,255,0.06)', flexShrink: 0 }
+const userAvatar = { width: 30, height: 30, borderRadius: '50%', flexShrink: 0, background: 'rgba(99,102,241,0.25)', border: '1px solid rgba(99,102,241,0.4)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13, fontWeight: 700, color: '#a5b4fc' }
+const logoutBtn = { background: 'none', border: 'none', color: 'rgba(255,255,255,0.3)', cursor: 'pointer', fontSize: 16, padding: 4, borderRadius: 4 }
+const iconBtn = { background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 6, color: 'rgba(255,255,255,0.6)', cursor: 'pointer', fontSize: 16, width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 0 }
+const iconBtnAccent = { ...iconBtn, background: 'rgba(99,102,241,0.15)', border: '1px solid rgba(99,102,241,0.3)', color: '#818cf8' }
+const overlay = { position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(6px)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 300, padding: '1rem' }
+const modalCard = { background: '#1a1a28', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 14, padding: '20px', width: '100%', maxWidth: 380, boxShadow: '0 25px 50px rgba(0,0,0,0.6)' }
+const closeBtn = { background: 'none', border: 'none', color: 'rgba(255,255,255,0.4)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 4 }
+const errorBox = { display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', marginBottom: 12, borderRadius: 8, background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.25)', color: '#fca5a5', fontSize: 13 }
+const labelStyle = { display: 'block', fontSize: 11, fontWeight: 500, color: 'rgba(255,255,255,0.4)', marginBottom: 4, letterSpacing: '0.04em' }
+const inputStyle = { width: '100%', boxSizing: 'border-box', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 7, padding: '9px 12px', color: '#e5e7eb', fontSize: 13, fontFamily: "'Inter', sans-serif", outline: 'none' }
+const submitBtnStyle = { flex: 1, padding: '9px 0', background: 'linear-gradient(135deg, #4f46e5, #06b6d4)', border: 'none', borderRadius: 7, color: '#fff', fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: "'Inter', sans-serif" }
+const cancelBtnStyle = { flex: 1, padding: '9px 0', background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.08)', borderRadius: 7, color: 'rgba(255,255,255,0.5)', fontSize: 13, cursor: 'pointer', fontFamily: "'Inter', sans-serif" }
