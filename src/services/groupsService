@@ -1,59 +1,26 @@
-/**
- * src/services/groupsService.js
- *
- * FIX: Return shapes corrected to match what DashboardPage expects.
- *
- * getGroups()    — backend returns GroupListResponse { groups, total }
- *                  we return the full object so DashboardPage can do data.groups
- * getChannels()  — backend returns ChannelListResponse { channels, total }
- *                  we return the full object so DashboardPage can do data.channels
- * createGroup()  — returns GroupResponse (single object) — unchanged
- * joinGroup()    — returns GroupJoinResponse { message, group } — unchanged
- * createChannel()— returns ChannelResponse (single object) — unchanged
- */
 import api from './api'
-
-// ---------------------------------------------------------------------------
-// Groups
-// ---------------------------------------------------------------------------
 
 export async function getGroups() {
   const response = await api.get('/groups')
-  // Backend returns { groups: [...], total: N }
-  return response.data   // ← return full object, not just .groups
+  return response.data.groups ?? []
 }
 
 export async function createGroup({ name, description, join_password, is_read_only = false }) {
-  const response = await api.post('/groups', {
-    name,
-    description:  description || undefined,
-    join_password,
-    is_read_only,
-  })
+  const response = await api.post('/groups', { name, description: description || undefined, join_password, is_read_only })
   return response.data
 }
 
 export async function joinGroup(groupId, joinPassword) {
-  const response = await api.post(`/groups/${groupId}/join`, {
-    join_password: joinPassword,
-  })
-  return response.data  // { message, group }
+  const response = await api.post(`/groups/${groupId}/join`, { join_password: joinPassword })
+  return response.data
 }
-
-// ---------------------------------------------------------------------------
-// Channels
-// ---------------------------------------------------------------------------
 
 export async function getChannels(groupId) {
   const response = await api.get(`/groups/${groupId}/channels`)
-  // Backend returns { channels: [...], total: N }
-  return response.data   // ← return full object, not just .channels
+  return response.data.channels ?? []
 }
 
 export async function createChannel(groupId, { name, topic }) {
-  const response = await api.post(`/groups/${groupId}/channels`, {
-    name,
-    topic: topic || undefined,
-  })
+  const response = await api.post(`/groups/${groupId}/channels`, { name, topic: topic || undefined })
   return response.data
 }
